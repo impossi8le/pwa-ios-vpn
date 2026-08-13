@@ -3,6 +3,8 @@
 Теоретическое обоснование и план: **PWA** устанавливает VPN-конфигурацию на **iOS** через Apple-профиль (`.mobileconfig`) и управляет туннелем через **Shortcuts (Команды)** + приложение **OpenVPN Connect**; на **Android** — через `intent:`-ссылку на `.ovpn` (MIME `application/x-openvpn-profile`) + **OpenVPN for Android (ics-openvpn)**, включение — через Always-on VPN или автоматизатор (MacroDroid webhook).
 
 > Продукт: ТГ-бот продаёт VPN-конфигурации. Пользователь заходит на сайт, устанавливает PWA, видит купленные конфиги, жмёт «Установить» — и затем включает/выключает VPN одной кнопкой. Без ручной возни с `.ovpn`-файлами.
+>
+> **Реализация**: весь продукт (бэкенд, PWA, аналитика) реализуется LLM-агентом по самодостаточным спецификациям ниже — см. [IMPLEMENTATION.md](docs/IMPLEMENTATION.md).
 
 ## Содержимое
 
@@ -13,6 +15,8 @@
 | [RISKS.md](docs/RISKS.md) | iOS: ограничения и риски (Stolen Device Protection, 8 минут, Shortcuts на передний план, App Store 5.4, РФ) |
 | [ANDROID.md](docs/ANDROID.md) | Android: логика взаимодействия PWA ↔ OpenVPN (intent://, MIME, intent API, Always-on, 3 ветки UX, риски) |
 | [BACKEND.md](docs/BACKEND.md) | Бэкенд: считывание состояния VPN (IP-сравнение + CN), стек (версии авг 2026), модульность, очереди/логирование, n8n как внешний API |
+| [ANALYTICS.md](docs/ANALYTICS.md) | Полная аналитика: словарь событий, KPI, хранение (PostHog/ClickHouse+Metabase), checklist для LLM |
+| [IMPLEMENTATION.md](docs/IMPLEMENTATION.md) | **Самодостаточный план реализации для LLM-агента**: схема Prisma, API, фазы, DoD, критерии готовности |
 
 ## Состояние VPN
 
@@ -30,6 +34,7 @@
 | Бот | Telegram Bot API | **10.2** |
 | Логирование | pino | **10.3** |
 | Трассировка/метрики | OpenTelemetry | GA (graduated) |
+| Аналитика | PostHog (Cloud/self-host) | events, воронки, retention, SQL |
 | Автоматизации | **n8n 2.29+ (внешний API)** | не в ядре, вызываем по требованию |
 
 ## Ключевой вывод
