@@ -12,6 +12,25 @@
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | iOS: схема взаимодействия компонентов и механика по шагам |
 | [RISKS.md](docs/RISKS.md) | iOS: ограничения и риски (Stolen Device Protection, 8 минут, Shortcuts на передний план, App Store 5.4, РФ) |
 | [ANDROID.md](docs/ANDROID.md) | Android: логика взаимодействия PWA ↔ OpenVPN (intent://, MIME, intent API, Always-on, 3 ветки UX, риски) |
+| [BACKEND.md](docs/BACKEND.md) | Бэкенд: считывание состояния VPN (IP-сравнение + CN), стек (версии авг 2026), модульность, очереди/логирование, n8n как внешний API |
+
+## Состояние VPN
+
+Из чистого браузера определить статус VPN нельзя — единственный кросс-платформенный способ: **PWA спрашивает свой бэкенд, тот видит реальный IP клиента и сверяет с IP VPN-сервера**. «Чей конфиг активен» определяется **по Common Name** из status-файла OpenVPN. Подробнее — [BACKEND.md](docs/BACKEND.md).
+
+## Стек (актуальные версии, август 2026)
+
+| Слой | Технология | Версия |
+|---|---|---|
+| Рантайм | Node.js | **24 (Active LTS)** |
+| PWA-фронт | React + Vite + vite-plugin-pwa | React **19.2**, Vite **8.2**, vite-plugin-pwa **1.3** |
+| БД | PostgreSQL | **18** |
+| ORM | Prisma | **7.8** |
+| Очереди | BullMQ + Redis | BullMQ **6.0**, Redis **8.10** |
+| Бот | Telegram Bot API | **10.2** |
+| Логирование | pino | **10.3** |
+| Трассировка/метрики | OpenTelemetry | GA (graduated) |
+| Автоматизации | **n8n 2.29+ (внешний API)** | не в ядре, вызываем по требованию |
 
 ## Ключевой вывод
 
