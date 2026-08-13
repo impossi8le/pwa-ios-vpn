@@ -1,0 +1,7 @@
+# Планы Claude
+.claude/
+
+# Системное
+.DS_Store
+Thumbs.db
+*.log
