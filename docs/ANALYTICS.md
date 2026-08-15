@@ -1,6 +1,6 @@
 # ANALYTICS.md — Полная аналитика продукта
 
-> Продукт: ТГ-бот продаёт OpenVPN-конфигурации, PWA (iOS + Android) отдаёт конфиг и включает VPN. Здесь — вся аналитика: какие события собираем, какие метрики считаем, как храним и визуализируем. Документ — **самодостаточная спецификация для LLM-реализации** (что реализовывать — описано явно).
+> Продукт (см. [PRODUCT.md](PRODUCT.md)): лендинг + личный кабинет в PWA, VPN-флоу в PWA — только iOS/macOS, Android — нативное приложение (WebView кабинета + OpenVPN-модуль), ТГ-бот продаёт конфиги. Здесь — вся аналитика: события, метрики, хранение, визуализация. Документ — **самодостаточная спецификация для LLM-реализации**.
 
 ---
 
@@ -38,14 +38,15 @@
 | Событие | Свойства | Когда |
 |---|---|---|
 | `bot_start` | `platform` | юзер запустил бота |
-| `order_created` | `plan`, `price_usd`, `payment_method` | создан заказ |
+| `tg_linked` | `channel` (`widget`/`code`) | аккаунт привязан к Telegram |
+| `order_created` | `plan`, `price_usd`, `payment_method`, `channel` (`bot`/`web`) | создан заказ |
 | `order_paid` | `plan`, `price_usd`, `payment_method`, `config_id` | оплачен заказ |
 | `order_failed` | `plan`, `payment_method`, `reason` | оплата не прошла |
 | `config_issued` | `config_id`, `cn`, `expires_at` | выдан конфиг |
 | `config_revoked` | `config_id`, `cn`, `reason` | отозван конфиг |
 | `subscription_renewed` | `config_id`, `plan` | продлена подписка |
 | `subscription_expired` | `config_id` | истекла подписка |
-| `vpn_session_start` | `cn`, `config_id` | клиент подключился (из status-файла) |
+| `vpn_session_start` | `cn`, `config_id`, `source` (`status`/`app`) | клиент подключился (status-файл или репорт приложения) |
 | `vpn_session_end` | `cn`, `config_id`, `bytes`, `duration_s` | клиент отключился |
 | `vpn_status_checked` | `platform`, `result` | PWA запросил статус (IP-сравнение) |
 
@@ -53,12 +54,26 @@
 
 | Событие | Свойства | Когда |
 |---|---|---|
-| `pwa_visit` | `platform`, `screen` | открыл PWA |
-| `pwa_install_click` | `platform` | нажал «Установить» |
-| `pwa_config_downloaded` | `platform`, `config_id` | скачал конфиг |
-| `pwa_vpn_toggle` | `platform`, `action` (`on`/`off`), `method` | нажал «Включить/Выключить» |
+| `landing_visit` | `screen`, `utm_source` | открыл лендинг `/` |
+| `auth_register` | `channel` (`web`/`bot`) | зарегистрировался (email+пароль) |
+| `auth_login` | `channel` (`web`/`tg`) | вошёл в кабинет |
+| `pwa_vpn_toggle` | `platform`, `action` (`on`/`off`), `method` | нажал «Включить/Выключить» (iOS/macOS) |
 | `pwa_status_poll` | `platform`, `result` | опросил статус |
 | `pwa_error` | `platform`, `error_code` | ошибка в PWA |
+
+> `pwa_visit` / `pwa_install_click` / `pwa_config_downloaded` из старого словаря ушли: установка PWA на главный экран больше не является обязательным шагом продукта (лендинг открывается и без установки; Android уходит в нативное приложение). Их место занимают события лендинга и приложения.
+
+### 2.3. События нативного приложения (Android, через бэкенд)
+
+| Событие | Свойства | Когда |
+|---|---|---|
+| `app_install` | `os_version`, `brand` | приложение запущено впервые |
+| `app_login` | — | вход в приложении |
+| `app_token_created` | — | создан app-токен (из кабинета) |
+| `app_config_downloaded` | `config_id` | приложение скачало конфиг |
+| `app_vpn_connect` | `config_id` | туннель поднят (VpnService) |
+| `app_vpn_disconnect` | `config_id`, `duration_s` | туннель разорван |
+| `app_error` | `error_code` | ошибка в приложении |
 
 ---
 
@@ -68,20 +83,22 @@
 
 ### 3.1. Активность (базовая)
 - **DAU/WAU/MAU** — уникальные `distinct_id` за день/неделю/месяц (по любому событию).
-- **Установки PWA** — `pwa_visit` впервые для `session_id`.
+- **Установки PWA** — `landing_visit` впервые для `session_id`.
 - **Активные VPN-сессии** — `vpn_session_start` минус `vpn_session_end` (мгновенно).
 
 ### 3.2. Продажи
+- **Воронка лендинга** — `landing_visit → auth_register → order_created → order_paid` (с учётом канала: `channel=web` / `channel=bot`; для бота начало воронки — `bot_start`).
 - **Конверсия заказ → оплата** — `order_paid` / `order_created` по `payment_method`.
+- **Канал оплаты** — доля `payment_method` (`stars` / `crypto` / `fiat`) и `channel` (`bot`/`web`).
 - **ARPU / ARPPU** — выручка / (все юзеры | платящие).
 - **MRR, Churn** — по `subscription_renewed` / `subscription_expired`.
 - **LTV** — сумма `order_paid.price_usd` по `distinct_id` до ухода.
 
 ### 3.3. Продукт (функциональность)
-- **% установивших конфиг** — `pwa_config_downloaded` / `pwa_visit`.
-- **% «включивших VPN»** — `vpn_session_start` / `order_paid` (активация).
-- **Средняя длительность сессии VPN** — avg `duration_s`.
-- **Частота включения** — `pwa_vpn_toggle` на юзера/день.
+- **% скачавших конфиг** — (`app_config_downloaded` ∪ скачивания в PWA) / (`order_paid`).
+- **% «включивших VPN» (активация)** — `vpn_session_start` / `order_paid`, по платформе (iOS/macOS в PWA, Android в приложении).
+- **Средняя длительность сессии VPN** — avg `duration_s` (из `vpn_session_end` и `app_vpn_disconnect`).
+- **Частота включения** — `pwa_vpn_toggle` + `app_vpn_connect` на юзера/день.
 - **Доставка конфига (time-to-first-VPN)** — время от `order_paid` до первого `vpn_session_start`.
 
 ### 3.4. Инфраструктура
@@ -119,7 +136,8 @@
 ## 5. Поток данных (server-side first)
 
 ```
-PWA ──/api/events──► Бэкенд (валидация, distinct_id)
+PWA (лендинг/кабинет) ──/api/events──► Бэкенд (валидация, distinct_id)
+Нативное приложение (Android) ──/api/vpn/session, /api/events──► Бэкенд
    │
    ├──► PostgreSQL: транзакционные данные (users, orders, configs, sessions)
    │
@@ -138,10 +156,11 @@ OpenVPN status-файл ──► Worker (BullMQ) ──► vpn_session_start/en
 ### MVP
 - [ ] Эндпоинт `POST /api/events` (валидация, `distinct_id`, `session_id`, запись в PostHog)
 - [ ] Словарь событий (раздел 2) как константы/типы
-- [ ] Эмиттер событий в бэкенде (`services/analytics.ts`) — обёртка для `order_paid`, `config_issued`, `vpn_session_start/end`
-- [ ] Worker «status-parser» → пишет `vpn_session_start/end` в аналитику
-- [ ] PWA: отправка `pwa_visit`, `pwa_install_click`, `pwa_vpn_toggle`, `pwa_status_poll`
-- [ ] PostHog: проект, дашборды «Продажи», «Продукт», «VPN-активность»
+- [ ] Эмиттер событий в бэкенде (`services/analytics.ts`) — обёртка для `order_paid`, `config_issued`, `vpn_session_start/end`, `tg_linked`
+- [ ] Worker «status-parser» → пишет `vpn_session_start/end` в аналитику (source=`status`)
+- [ ] PWA: отправка `landing_visit`, `auth_register`, `auth_login`, `pwa_vpn_toggle`, `pwa_status_poll`
+- [ ] Нативное приложение: `POST /api/vpn/session` → `vpn_session_start/end` (source=`app`); события `app_*` через `POST /api/events`
+- [ ] PostHog: проект, дашборды «Продажи», «Продукт», «VPN-активность», «Лендинг»
 - [ ] Метрики 3.1–3.3 как сохранённые запросы/инсайты в PostHog
 
 ### Later

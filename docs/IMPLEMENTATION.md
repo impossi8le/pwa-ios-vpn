@@ -1,16 +1,18 @@
 # IMPLEMENTATION.md — План реализации (самодостаточный, для LLM-агентов)
 
-> Документ — **полная спецификация для LLM-реализации**: содержит все входные данные, правила и критерии готовности. LLM-агент, читающий только этот файл (+ связанные `PLAN/ARCHITECTURE/RISKS/ANDROID/BACKEND/ANALYTICS`), может реализовать продукт без устных пояснений. Продукт: ТГ-бот продаёт OpenVPN-конфигурации, PWA раздаёт конфиги и включает VPN на iOS/Android, бэкенд — ядро.
+> Документ — **полная спецификация для LLM-реализации**: содержит все входные данные, правила и критерии готовности. LLM-агент, читающий только этот файл (+ связанные `PLAN/ARCHITECTURE/RISKS/PRODUCT/NATIVE-APPS/BACKEND/ANALYTICS`), может реализовать продукт без устных пояснений.
 
 ---
 
 ## 0. Цель и скоуп MVP
 
-**MVP**: ТГ-бот → оплата → генерация OpenVPN-конфига → PWA показывает купленные конфиги → пользователь устанавливает и включает VPN → бэкенд показывает статус (включён/выключен/чей конфиг). Полная аналитика.
+**Продукт** (см. [PRODUCT.md](PRODUCT.md) — эталон формы): ТГ-бот продаёт OpenVPN-конфиги; **PWA** = публичный лендинг + личный кабинет; VPN-флоу в PWA — только **iOS/macOS**; **Android** — нативное приложение (кабинет WebView + OpenVPN-модуль); Windows/Linux — кабинет в PWA + `.ovpn` вручную (нативные приложения позже). Бэкенд — ядро. Полная аналитика.
 
-**Вне MVP**: n8n-автоматизации (внешний API, подключается позже), нативная обёртка TWA, поддержка WireGuard, многоязычность, реселлеры.
+**MVP**: лендинг → регистрация/вход (email+пароль, привязка к Telegram) → оплата (Stars в боте + веб-оплата в кабинете) → генерация OpenVPN-конфига → установка/включение (iOS/macOS в PWA; Android в нативном приложении) → статус VPN → аналитика.
 
-**Архитектура**: [BACKEND.md](BACKEND.md) (стек, модульность, состояние VPN) + [ANDROID.md](ANDROID.md) + [PLAN.md](PLAN.md) + [ANALYTICS.md](ANALYTICS.md).
+**Вне MVP**: n8n-автоматизации (внешний API, позже), Windows/Linux нативные приложения, WireGuard, многоязычность, реселлеры.
+
+**Архитектура**: [PRODUCT.md](PRODUCT.md) + [BACKEND.md](BACKEND.md) + [NATIVE-APPS.md](NATIVE-APPS.md) + [PLAN.md](PLAN.md) + [ANDROID.md](ANDROID.md) (deprecated, исследование) + [ANALYTICS.md](ANALYTICS.md).
 
 ---
 
@@ -42,9 +44,9 @@
   /backend
     /src
       /api            # Fastify routes + auth
-      /services       # бизнес-логика (orders, configs, vpn-status, billing)
+      /services       # бизнес-логика (orders, configs, vpn-status, billing, accounts)
       /openvpn        # коннектор к серверу (status-файл, management, easyrsa)
-      /telegram       # бот: webhook/long polling, команды, платежи
+      /telegram       # бот: webhook/long polling, команды, платежи, привязка
       /queues         # BullMQ: worker'ы (config.generate, cert.revoke, status.poll, notify.expiry)
       /n8n            # HTTP-клиент к внешнему n8n (по требованию)
       /workers        # фоновые задачи
@@ -54,6 +56,9 @@
     /.env.example
   /pwa
     /src              # React + Vite + vite-plugin-pwa
+      /pages          # лендинг (/), кабинет (/app), VPN-экран (iOS/macOS)
+  /android            # нативное приложение (Kotlin): WebView + OpenVPN-модуль
+    /app              # приложение
   /infra              # docker-compose, OpenVPN-конфиги, systemd
   /docs               # этот и связанные документы
 ```
@@ -65,12 +70,24 @@
 ```prisma
 model User {
   id          String   @id @default(cuid())
-  tgId        BigInt   @unique                 // Telegram user_id
+  email       String?  @unique                 // основной логин (email+пароль)
+  passwordHash String?                         // argon2, nullable пока нет пароля
+  phone       String?                          // зарезервировано (2FA/поддержка)
+  tgId        BigInt?  @unique                 // Telegram user_id (не у всех)
   tgUsername  String?
-  email       String?
   createdAt   DateTime @default(now())
   orders      Order[]
   sessions    VpnSession[]
+  appTokens   AppToken[]
+}
+
+model AppToken {                               // для нативных приложений
+  id        String   @id @default(cuid())
+  userId    String
+  tokenHash String   @unique                   // храним только hash
+  name      String?                            // «Android (Pixel 8)»
+  revokedAt DateTime?
+  createdAt DateTime @default(now())
 }
 
 model Order {
@@ -79,6 +96,7 @@ model Order {
   plan          String    // daily | monthly | quarterly | yearly
   priceUsd      Decimal
   paymentMethod String    // stars | crypto | fiat
+  channel       String?   // bot | web
   status        String    // created | paid | failed | refunded
   paidAt        DateTime?
   config        Config?
@@ -90,7 +108,7 @@ model Config {
   orderId   String    @unique
   cn        String    @unique   // Common Name = cert name = имя в CCD
   ovpn      String?             // содержимое .ovpn
-  mobileconfig String?          // содержимое .mobileconfig (для iOS)
+  mobileconfig String?          // содержимое .mobileconfig (для iOS/macOS)
   expiresAt DateTime
   revokedAt DateTime?
   createdAt DateTime  @default(now())
@@ -101,6 +119,7 @@ model VpnSession {
   cn         String
   configId   String?
   realIp     String?
+  source     String?  // status | app
   connectedAt DateTime
   disconnectedAt DateTime?
   bytesIn    BigInt?
@@ -118,16 +137,34 @@ model VpnSession {
 
 ## 4. API (Fastify, версии)
 
-### 4.1. Публичные (auth: Telegram initData)
+### 4.1. Auth (email+пароль + Telegram)
+```
+POST /api/auth/register               # email + пароль → создаёт User, JWT
+POST /api/auth/login                  # email + пароль → JWT (access + refresh)
+POST /api/auth/tg-login               # Telegram Login Widget (HMAC) → вход/привязка
+POST /api/auth/link-tg                # код привязки из бота → привязка tg к аккаунту
+POST /api/auth/refresh                # refresh → новый access
+```
+
+### 4.2. Кабинет (auth: JWT / app-токен)
 ```
 POST /api/events                    # приём аналитических событий из PWA
 GET  /api/configs                   # список купленных конфигов юзера
 GET  /api/configs/:id/download      # отдать .ovpn / .mobileconfig
 GET  /api/vpn/status                # статус: включён/выключен + чей конфиг + сессии
 POST /api/pwa/log                   # ошибки PWA
+POST /api/orders                    # создать заказ из кабинета (веб-оплата)
+GET  /api/orders/:id/payurl         # ссылка/QR веб-оплаты (crypto/fiat)
 ```
 
-### 4.2. Бот (webhook или long polling)
+### 4.3. Нативное приложение (auth: app-токен)
+```
+POST /api/app/token                 # создать app-токен (из кабинета, с паролем)
+POST /api/vpn/session               # репорт сессии из приложения: start/stop, bytes
+GET  /api/app/me                    # профиль для приложения
+```
+
+### 4.4. Бот (webhook или long polling)
 ```
 /start, /help                        # приветствие, инструкция
 /buy <plan>                          # создать заказ
@@ -135,9 +172,10 @@ POST /api/pwa/log                   # ошибки PWA
 /my                                  # мои конфиги
 /status                              # статус подписки
 /renew, /cancel
+/link                                # сгенерировать код привязки к PWA-аккаунту
 ```
 
-### 4.3. Ответы — JSON, ошибки — RFC 7807 (`{ "error": { "code", "message" } }`).
+### 4.5. Ответы — JSON, ошибки — RFC 7807 (`{ "error": { "code", "message" } }`).
 
 ---
 
@@ -147,15 +185,30 @@ POST /api/pwa/log                   # ошибки PWA
 - **«Чей конфиг»**: из status-файла OpenVPN (`--status /var/run/openvpn-status.log 5`, формат `status 3`), парсим `Common Name` → сопоставляем с `Config.cn` → `Order` → `User`.
 - **Сессии**: Worker `status.poll` (BullMQ, раз в 5–30 с) парсит status-файл, пишет `VpnSession` + события `vpn_session_start/end`.
 - **Пограничные случаи**: IPv6 (проверять v4+v6), split tunneling, CDN/XFF, двойной VPN → статус «unconfirmed». Подробно — [BACKEND.md](BACKEND.md) §2.3.
+- **Нативное приложение (Android)**: локальный статус через `VpnService`/`ConnectivityManager` + репорт `POST /api/vpn/session`. Подробно — [NATIVE-APPS.md](NATIVE-APPS.md).
+
+### 5.5. Роутинг в PWA (кто что видит)
+
+```
+/                  лендинг (публичный): оффер, тарифы, FAQ, CTA «Купить в боте» / «Войти»
+/app               кабинет (auth): подписка, конфиги, оплата, статистика
+/app/vpn           VPN-экран — первый, если (iOS|macOS) ∧ авторизован ∧ активная подписка
+                     · iOS:   «Установить» .mobileconfig + «Включить/Выключить» (shortcuts://)
+                     · macOS: «Установить» .mobileconfig + инструкция меню-бар + «Проверить статус»
+                   иначе: домашняя страница кабинета
+Внутри нативного приложения (?embed=app): скрыть «Скачать приложение», «Установить PWA», «Войти»
+```
+
+Правило подробно — [PRODUCT.md](PRODUCT.md) §2. Детекция платформы по userAgent + ручной переключатель в настройках.
 
 ---
 
 ## 6. События аналитики (что эмитить)
 
 См. [ANALYTICS.md](ANALYTICS.md) §2. Минимум для MVP:
-`order_paid`, `config_issued`, `vpn_session_start`, `vpn_session_end`, `vpn_status_checked`, `pwa_visit`, `pwa_install_click`, `pwa_vpn_toggle`, `pwa_status_poll`.
+`landing_visit`, `auth_register`, `auth_login`, `tg_linked`, `order_created`, `order_paid`, `config_issued`, `vpn_session_start`, `vpn_session_end`, `vpn_status_checked`, `pwa_vpn_toggle`, `pwa_status_poll`, `app_install`, `app_vpn_connect`.
 
-Эмиттер — `services/analytics.ts`, пишет в PostHog через `posthog-node`. Server-side first.
+Эмиттер — `services/analytics.ts`, пишет в PostHog через `posthog-node`. Server-side first. События приложения (Android) приходят через `POST /api/vpn/session`/`POST /api/events` и перенаправляются в PostHog.
 
 ---
 
@@ -182,42 +235,63 @@ POST /api/pwa/log                   # ошибки PWA
 - [ ] OpenVPN-сервер: статус-файл, management, easyrsa, CRL, IPv6
 
 ### Фаза 1 — Бот + оплата (1.5 дня)
-- [ ] Telegram bot: webhook/long polling, команды `/start /buy /pay /my /status /renew /cancel`
+- [ ] Telegram bot: webhook/long polling, команды `/start /buy /pay /my /status /renew /cancel /link`
 - [ ] Оплата Telegram Stars (или крипта/фиат по решению)
 - [ ] `order_paid` → генерация конфига (Worker `config.generate`)
+- [ ] Код привязки аккаунта к Telegram (`/link` → код → ввод в кабинете)
 
 ### Фаза 2 — Генерация конфигов (1 день)
-- [ ] Конвертер `.ovpn` → `.mobileconfig` (VendorConfig, VPNSubType) для iOS
+- [ ] Конвертер `.ovpn` → `.mobileconfig` (VendorConfig, VPNSubType) для iOS/macOS
 - [ ] `.ovpn` с уникальным CN, `auth-user-pass`, сроком действия
 - [ ] Отзыв/продление (Worker `cert.revoke`, `notify.expiry`)
 
-### Фаза 3 — PWA (2 дня)
-- [ ] React + Vite + vite-plugin-pwa (manifest, service worker)
-- [ ] Личный кабинет: список конфигов, кнопки «Установить» (iOS `.mobileconfig`, Android `intent:`)
-- [ ] «Включить/Выключить» (iOS `shortcuts://`, Android Always-on инструкция / MacroDroid)
+### Фаза 3 — PWA: лендинг + кабинет (3 дня)
+- [ ] **Лендинг** `/`: статический, SEO (meta/OG), тарифы, FAQ, CTA «Купить в боте» / «Войти»
+- [ ] **Аккаунты**: регистрация/вход email+пароль (argon2), JWT, refresh
+- [ ] **Привязка Telegram**: Telegram Login Widget + код из бота
+- [ ] **Кабинет** `/app`: подписка, конфиги, оплата, статистика
+- [ ] **Веб-оплата** в кабинете (crypto/fiat) — `POST /api/orders`, `GET payurl`
+- [ ] **Роутинг**: VPN-экран первым для iOS/macOS при активной подписке; ручной переключатель платформы; `?embed=app` скрывает установочные блоки
+- [ ] React + Vite + vite-plugin-pwa (manifest, service worker, установка на Home)
+
+### Фаза 4 — PWA: VPN-экран iOS/macOS (1 день)
+- [ ] «Установить»: `.mobileconfig` (iOS) / инструкция меню-бар (macOS)
+- [ ] «Включить/Выключить»: iOS `shortcuts://run-shortcut` (Set VPN) — только iOS; macOS — инструкция + «Проверить статус»
 - [ ] Статус VPN: `GET /api/vpn/status`, поллинг раз в 10 с
 
-### Фаза 4 — Состояние VPN (1 день)
+### Фаза 5 — Состояние VPN (1 день)
 - [ ] Worker `status.poll`: парсер status-файла → `VpnSession` + события
 - [ ] `GET /api/vpn/status`: IP-сравнение + CN-маппинг + пограничные случаи (IPv6, unconfirmed)
 
-### Фаза 5 — Аналитика (1 день)
+### Фаза 6 — Аналитика (1 день)
 - [ ] `POST /api/events` + эмиттер в PostHog
-- [ ] События §6, дашборды «Продажи», «Продукт», «VPN-активность»
+- [ ] События §6, дашборды «Продажи», «Продукт», «VPN-активность», «Лендинг»
 - [ ] Метрики: конверсия оплат, активация, MRR/churn (базово)
 
-### Фаза 6 — Запуск (0.5 дня)
+### Фаза 7 — Android-приложение (4 дня, MVP-параллельно)
+- [ ] Kotlin-приложение: WebView кабинета (`/app?embed=app`) + JS-мост
+- [ ] App-токен: создание из кабинета, хранение в Keystore, авторизация WebView
+- [ ] OpenVPN-модуль: бинарь openvpn отдельным процессом + VpnService
+- [ ] Локальный статус (VpnService/ConnectivityManager) + репорт `POST /api/vpn/session`
+- [ ] Foreground service (фон), отзыв токена → разлогин, серверный 401 → разрыв туннеля
+- [ ] Подробно — [NATIVE-APPS.md](NATIVE-APPS.md)
+
+### Фаза 8 — Запуск (0.5 дня)
 - [ ] HTTPS (Caddy/Traefik), env-конфиг, systemd/docker для бота
-- [ ] Смоук-тест на реальных устройствах (iOS 16.4+, Android 13+)
+- [ ] Смоук-тест на реальных устройствах (iOS 16.4+, macOS, Android 13+)
 - [ ] Алерты (логи ошибок, метрики)
 
 ---
 
 ## 9. Критерии готовности MVP (acceptance)
 
-- [ ] Юзер покупает конфиг в боте → получает `.ovpn` + `.mobileconfig` автоматически
-- [ ] PWA показывает конфиги, кнопка «Установить» работает на iOS и Android
-- [ ] Кнопка «Включить» запускает VPN (iOS через Shortcuts, Android через Always-on/автоматизатор)
+- [ ] Лендинг `/` открывается, SEO-теги на месте, CTA ведут в бота и на регистрацию
+- [ ] Регистрация/вход (email+пароль), привязка Telegram (виджет + код `/link`)
+- [ ] Юзер покупает конфиг (бот Stars ИЛИ веб-оплата в кабинете) → получает `.ovpn` + `.mobileconfig`
+- [ ] Роутинг: iOS/macOS с активной подпиской → VPN-экран первым; остальные платформы → кабинет
+- [ ] iOS: «Установить» (.mobileconfig) + «Включить» (shortcuts://) работают
+- [ ] macOS: «Установить» (.mobileconfig) + инструкция меню-бар + статус по IP
+- [ ] Android-приложение: вход → WebView-кабинет → скачивание конфига → подключение через VpnService → локальный статус → репорт сессии
 - [ ] `GET /api/vpn/status` корректно показывает «включён/выключен/чей конфиг» (тест на реальном сервере)
 - [ ] Аналитика: события из §6 идут в PostHog, дашборды построены
 - [ ] Пограничные случаи состояния VPN (§5) учтены: IPv6, двойной VPN → «unconfirmed»
@@ -227,8 +301,10 @@ POST /api/pwa/log                   # ошибки PWA
 
 ## 10. Открытые вопросы (решить перед реализацией)
 
-1. **Оплата**: Telegram Stars (просто, но комиссия) vs крипта vs фиат. Влияет на `Order.paymentMethod`.
+1. **Веб-оплата**: CryptoBot vs ЮKassa vs другой провайдер (для кабинета). Влияет на `Order.paymentMethod` (`crypto`/`fiat`).
 2. **PostHog Cloud vs self-host** (РФ-аудитория — 152-ФЗ).
 3. **Long polling vs webhook** для бота (нужен ли публичный HTTPS для webhook; для MVP подходит long polling).
 4. **Продление подписки**: `easyrsa renew` vs перевыпуск конфига.
 5. **Лимит одновременных подключений** на один конфиг: `--duplicate-cn off` (default) или CCD.
+6. **Лицензия Android-приложения**: если линковать ics-openvpn — приложение становится GPL; на MVP решено — openvpn отдельным процессом (см. [NATIVE-APPS.md](NATIVE-APPS.md) §2.2).
+7. **Хранение паролей**: email+пароль (argon2) — необходимость подтверждения email / восстановления пароля на старте.

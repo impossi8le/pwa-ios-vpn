@@ -1,26 +1,44 @@
-# PWA → VPN (iOS + Android)
+# PWA + Нативные приложения → OpenVPN
 
-Теоретическое обоснование и план: **PWA** устанавливает VPN-конфигурацию на **iOS** через Apple-профиль (`.mobileconfig`) и управляет туннелем через **Shortcuts (Команды)** + приложение **OpenVPN Connect**; на **Android** — через `intent:`-ссылку на `.ovpn` (MIME `application/x-openvpn-profile`) + **OpenVPN for Android (ics-openvpn)**, включение — через Always-on VPN или автоматизатор (MacroDroid webhook).
+Продукт: **ТГ-бот продаёт OpenVPN-конфигурации**. Пользователь заходит на **PWA-сайт** (лендинг + личный кабинет), покупает подписку, устанавливает VPN-профиль и включает туннель. VPN-управление в PWA — на **iOS и macOS**; на **Android** — через нативное приложение (встроенный кабинет + OpenVPN-модуль); Windows/Linux — кабинет в PWA + `.ovpn` вручную (нативные приложения позже).
 
-> Продукт: ТГ-бот продаёт VPN-конфигурации. Пользователь заходит на сайт, устанавливает PWA, видит купленные конфиги, жмёт «Установить» — и затем включает/выключает VPN одной кнопкой. Без ручной возни с `.ovpn`-файлами.
->
 > **Реализация**: весь продукт (бэкенд, PWA, аналитика) реализуется LLM-агентом по самодостаточным спецификациям ниже — см. [IMPLEMENTATION.md](docs/IMPLEMENTATION.md).
+
+## Форма продукта
+
+```
+PWA
+├── /            Лендинг (публичный): оффер, тарифы, FAQ, «Купить в боте» / «Войти»
+└── /app         Кабинет (авторизованный)
+      ├── iOS / macOS   → VPN-экран первым (установка профиля, вкл/выкл, статус)
+      └── Android/Win/Linux → кабинет без VPN-экрана: подписка, оплата, «Скачать приложение»
+
+Нативное приложение (Android, MVP)
+├── WebView → /app (кабинет, авторизация по app-токену)
+└── Нативный OpenVPN-модуль: подключение, локальный статус, репорт сессий в бэкенд
+```
+
+**Правило роутинга**: VPN-экран открывается первым, только если `(iOS | macOS) ∧ авторизован ∧ активная подписка`. Подробно — [PRODUCT.md](docs/PRODUCT.md).
 
 ## Содержимое
 
 | Файл | О чём |
 |------|-------|
-| [PLAN.md](docs/PLAN.md) | iOS: полное техническое обоснование (почему это работает) + пошаговый план реализации |
+| [PRODUCT.md](docs/PRODUCT.md) | **Форма продукта**: лендинг + кабинет + нативные приложения, правило роутинга, аккаунты, оплата |
+| [PLAN.md](docs/PLAN.md) | iOS: полное техническое обоснование (почему это работает) + пошаговый план |
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | iOS: схема взаимодействия компонентов и механика по шагам |
-| [RISKS.md](docs/RISKS.md) | iOS: ограничения и риски (Stolen Device Protection, 8 минут, Shortcuts на передний план, App Store 5.4, РФ) |
-| [ANDROID.md](docs/ANDROID.md) | Android: логика взаимодействия PWA ↔ OpenVPN (intent://, MIME, intent API, Always-on, 3 ветки UX, риски) |
-| [BACKEND.md](docs/BACKEND.md) | Бэкенд: считывание состояния VPN (IP-сравнение + CN), стек (версии авг 2026), модульность, очереди/логирование, n8n как внешний API |
-| [ANALYTICS.md](docs/ANALYTICS.md) | Полная аналитика: словарь событий, KPI, хранение (PostHog/ClickHouse+Metabase), checklist для LLM |
-| [IMPLEMENTATION.md](docs/IMPLEMENTATION.md) | **Самодостаточный план реализации для LLM-агента**: схема Prisma, API, фазы, DoD, критерии готовности |
+| [RISKS.md](docs/RISKS.md) | iOS: ограничения и риски (Stolen Device Protection, 8 минут, Shortcuts, App Store 5.4, РФ) |
+| [ANDROID.md](docs/ANDROID.md) | **DEPRECATED** — исследование intent-механики PWA↔OpenVPN (заменено нативным приложением) |
+| [NATIVE-APPS.md](docs/NATIVE-APPS.md) | **Нативные приложения**: Android (WebView кабинета + OpenVPN-модуль), лицензии, Windows/Linux позже |
+| [BACKEND.md](docs/BACKEND.md) | Бэкенд: состояние VPN (IP-сравнение + CN), аккаунты/app-токены, стек, модульность, n8n как внешний API |
+| [ANALYTICS.md](docs/ANALYTICS.md) | Полная аналитика: события, KPI, воронка лендинга, хранение (PostHog/ClickHouse+Metabase) |
+| [IMPLEMENTATION.md](docs/IMPLEMENTATION.md) | **Самодостаточный план для LLM-агента**: Prisma, API, фазы, DoD, критерии готовности |
 
 ## Состояние VPN
 
-Из чистого браузера определить статус VPN нельзя — единственный кросс-платформенный способ: **PWA спрашивает свой бэкенд, тот видит реальный IP клиента и сверяет с IP VPN-сервера**. «Чей конфиг активен» определяется **по Common Name** из status-файла OpenVPN. Подробнее — [BACKEND.md](docs/BACKEND.md).
+- **iOS/macOS (PWA)** — из браузера статус не прочитать: PWA спрашивает бэкенд, тот видит реальный IP клиента и сверяет с IP VPN-сервера. «Чей конфиг активен» — по **Common Name** из status-файла OpenVPN.
+- **Android (нативное приложение)** — статус известен локально и точно (VpnService/ConnectivityManager); приложение репортит сессии в бэкенд (`POST /api/vpn/session`).
+- Подробно — [BACKEND.md](docs/BACKEND.md) и [NATIVE-APPS.md](docs/NATIVE-APPS.md).
 
 ## Стек (актуальные версии, август 2026)
 
@@ -35,35 +53,28 @@
 | Логирование | pino | **10.3** |
 | Трассировка/метрики | OpenTelemetry | GA (graduated) |
 | Аналитика | PostHog (Cloud/self-host) | events, воронки, retention, SQL |
+| Android-приложение | Kotlin + Jetpack Compose + openvpn (отдельный процесс) | minSdk 24, targetSdk 36 |
 | Автоматизации | **n8n 2.29+ (внешний API)** | не в ядре, вызываем по требованию |
 
 ## Ключевой вывод
 
-Механика **рабочая** — все звенья цепочки документированы Apple и OpenVPN:
-
-**iOS**
+**iOS/macOS**
 ```
-PWA (HTTPS)
-  └─ .mobileconfig (application/x-apple-aspen-config) → Safari → Настройки iOS → Профиль
-       (com.apple.vpn.managed, VPNSubType = net.openvpn.connect.app)
-  └─ shortcuts://run-shortcut?name=...  →  «Команды» → действие Set VPN (iOS 16.4+)
-       → NEVPNManager → OpenVPN Connect (NETunnelProviderManager) → туннель
+PWA (HTTPS) → .mobileconfig (com.apple.vpn.managed, VPNSubType) → системный профиль
+  iOS:   shortcuts://run-shortcut → Set VPN (iOS 16.4+) → туннель
+  macOS: меню-бар / OpenVPN Connect (экшена Set VPN на macOS нет)
 ```
 
-**Android**
+**Android (нативное приложение)**
 ```
-PWA (HTTPS)
-  └─ intent:#Intent;type=application/x-openvpn-profile → Chrome → OpenVPN for Android (ics-openvpn)
-       → импорт .ovpn профиля (1 тап, без лимита 8 минут)
-  └─ включение: Always-on VPN (настраивается 1 раз) — «включено всегда»
-       └─ или кнопка через автоматизатор (MacroDroid webhook) → intent net.openvpn.openvpn.CONNECT
+WebView кабинета → скачивание .ovpn → OpenVPN-модуль (VpnService + отдельный процесс openvpn)
+  → локальный статус → репорт сессий в бэкенд
 ```
 
 Реалистичный UX:
-- **iOS**: установка — 3 действия 1 раз (Allow → Install → добавить Shortcut), ежедневно — 1 тап + подтверждение Safari.
-- **Android**: установка — 1 тап (`intent:` → ics-openvpn); включение — Always-on VPN (1 раз настроить) или кнопка через автоматизатор.
-
-Сильно лучше ручной инструкции.
+- **iOS**: установка — 3 действия 1 раз (Allow → Install → Shortcut), ежедневно — 1 тап.
+- **macOS**: установка — как на iOS, включение — меню-бар / клиент, статус — по IP.
+- **Android**: вход в приложение → подключение одной кнопкой, статус точный.
 
 ## Как открыть план
 
